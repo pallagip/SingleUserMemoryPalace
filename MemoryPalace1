@@ -1,0 +1,276 @@
+import sqlite3
+from datetime import datetime
+import json
+
+class DatabaseManager:
+    def __init__(self, db_name="recipe_db.sqlite"):
+        self.conn = sqlite3.connect(db_name)
+        self.setup_database()
+    
+    def setup_database(self):
+        cursor = self.conn.cursor()
+        
+        # User Profiles Table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                user_id INTEGER PRIMARY KEY,
+                seasonal_preferences TEXT,
+                dietary_restrictions TEXT,
+                favorite_recipes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Interactions History Table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS interactions (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER,
+                recipe_id INTEGER,
+                rating INTEGER,
+                feedback TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES user_profiles(user_id)
+            )
+        ''')
+        
+        self.conn.commit()
+
+
+import openai
+from typing import Dict, List
+
+class RecipeAPI:
+    def __init__(self, api_key: str):
+        openai.api_key = api_key
+        self.model = "gpt-4.1-mini"
+        
+    def get_context_prompt(self, user_profile: Dict) -> str:
+        """Generate context prompt including user preferences"""
+        context = [
+            "You are a professional chef providing personalized recipe recommendations.",
+            f"Dietary restrictions: {user_profile.get('dietary_restrictions', 'none')}",
+            f"Seasonal preferences: {user_profile.get('seasonal_preferences', 'all seasons')}"
+        ]
+        return "\n".join(context)
+    
+    def get_recipe(self, user_id: int, preferences: Dict) -> Dict:
+        """Retrieve a personalized recipe recommendation"""
+        context_prompt = self.get_context_prompt(preferences)
+        
+        prompt = f"{context_prompt}\n\nProvide a detailed recipe recommendation based on these preferences."
+        
+        response = openai.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": context_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=512
+        )
+        # The new API returns a 'choices' list with 'message' as a dict
+        return response.choices[0].message['content'] if hasattr(response.choices[0].message, '__getitem__') else response.choices[0].message.content
+
+class UserProfileManager:
+    def __init__(self, db_manager: DatabaseManager):
+        self.db = db_manager
+        
+    def update_preferences(self, user_id: int, preferences: Dict):
+        """Update user preferences and maintain history"""
+        cursor = self.db.conn.cursor()
+        
+        # Store previous preferences in history
+        cursor.execute("""
+            INSERT INTO user_history (user_id, preferences, updated_at)
+            VALUES (?, ?, ?)
+        """, (user_id, json.dumps(preferences), datetime.now()))
+        
+        # Update current preferences
+        cursor.execute("""
+            UPDATE user_profiles 
+            SET seasonal_preferences = ?, 
+                dietary_restrictions = ?, 
+                favorite_recipes = ?
+            WHERE user_id = ?
+        """, (
+            preferences.get('seasonal_preferences'),
+            preferences.get('dietary_restrictions'),
+            preferences.get('favorite_recipes'),
+            user_id
+        ))
+        
+        self.db.conn.commit()
+    
+    def get_user_preferences(self, user_id: int) -> Dict:
+        """Retrieve current user preferences"""
+        cursor = self.db.conn.cursor()
+        cursor.execute("SELECT * FROM user_profiles WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        
+        return {
+            'seasonal_preferences': row[1],
+            'dietary_restrictions': row[2],
+            'favorite_recipes': row[3]
+        }
+
+class FeedbackProcessor:
+    def __init__(self, db_manager: DatabaseManager):
+        self.db = db_manager
+        
+    def process_feedback(self, user_id: int, recipe_id: int, rating: int, feedback: str):
+        """Process user feedback and update preferences"""
+        cursor = self.db.conn.cursor()
+        
+        # Store feedback
+        cursor.execute("""
+            INSERT INTO interactions (user_id, recipe_id, rating, feedback)
+            VALUES (?, ?, ?, ?)
+        """, (user_id, recipe_id, rating, feedback))
+        
+        # Update user preferences based on feedback
+        self._update_preferences_from_feedback(user_id, rating, feedback)
+        
+        self.db.conn.commit()
+    
+    def _update_preferences_from_feedback(self, user_id: int, rating: int, feedback: str):
+        """Analyze feedback and adjust user preferences accordingly"""
+        if rating < 3:
+            # Negative feedback - reduce weight of current preferences
+            self._adjust_preference_weights(user_id, factor=-0.5)
+        elif rating > 4:
+            # Positive feedback - increase weight of current preferences
+            self._adjust_preference_weights(user_id, factor=0.5)
+
+
+# Initialize components
+db_manager = DatabaseManager()
+recipe_api = RecipeAPI("your_openai_api_key")
+profile_manager = UserProfileManager(db_manager)
+feedback_processor = FeedbackProcessor(db_manager)
+
+# Example usage
+def get_personalized_recipe(user_id: int):
+    # Get current preferences
+    preferences = profile_manager.get_user_preferences(user_id)
+    
+    # Request recipe from OpenAI
+    recipe = recipe_api.get_recipe(user_id, preferences)
+    
+    return recipe
+
+def provide_feedback(user_id: int, recipe_id: int, rating: int, feedback_text: str):
+    feedback_processor.process_feedback(
+        user_id=user_id,
+        recipe_id=recipe_id,
+        rating=rating,
+        feedback=feedback_text
+    )
+
+
+# Simple command-line chat interface
+if __name__ == "__main__":
+    print("🍲 Welcome to the Personalized Recipe Assistant!")
+    print("Type 'chat' to get a recipe suggestion, 'feedback' to give feedback, or 'exit' to quit.")
+
+    user_id = 1
+    cursor = db_manager.conn.cursor()
+    cursor.execute("SELECT user_id FROM user_profiles WHERE user_id = ?", (user_id,))
+    if cursor.fetchone() is None:
+        cursor.execute("""
+            INSERT INTO user_profiles (user_id, seasonal_preferences, dietary_restrictions, favorite_recipes)
+            VALUES (?, ?, ?, ?)
+        """, (user_id, "summer", "vegetarian", "pasta"))
+        db_manager.conn.commit()
+
+    while True:
+        action = input("\n> ").strip().lower()
+        
+        if action == "chat":
+            print("\n💬 Entering chat mode! Talk to ChatGPT about recipes. Type /feedback, /update, or /exit at any time.")
+            chat_history = [
+                {"role": "system", "content": "You are a professional chef providing personalized recipe recommendations."},
+            ]
+            preferences = profile_manager.get_user_preferences(user_id)
+            # Add user preferences to system prompt
+            chat_history.append({"role": "system", "content": f"Dietary restrictions: {preferences.get('dietary_restrictions', 'none')}\nSeasonal preferences: {preferences.get('seasonal_preferences', 'all seasons')}\nFavorite recipes: {preferences.get('favorite_recipes', 'none')}"})
+            while True:
+                user_message = input("You: ")
+                if user_message.strip().lower() == "/exit":
+                    print("👋 Exiting chat mode.")
+                    break
+                elif user_message.strip().lower() == "/feedback":
+                    recipe_id_input = input("Recipe ID or Name: ")
+                    try:
+                        recipe_id = int(recipe_id_input)
+                    except ValueError:
+                        recipe_id = None
+                        recipe_name = recipe_id_input
+                    rating = int(input("Rating (1-5): "))
+                    feedback_text = input("Feedback: ")
+                    if recipe_id is not None:
+                        provide_feedback(user_id, recipe_id, rating, feedback_text)
+                    else:
+                        print(f"(Note: '{recipe_name}' is a recipe name, not an ID. Please implement recipe name lookup if needed.)")
+                    print("🙏 Thanks for your feedback!")
+                    continue
+                elif user_message.strip().lower() == "/update":
+                    seasonal = input("New seasonal preference: ")
+                    dietary = input("New dietary restriction: ")
+                    favorite = input("New favorite recipe: ")
+                    profile_manager.update_preferences(user_id, {
+                        "seasonal_preferences": seasonal,
+                        "dietary_restrictions": dietary,
+                        "favorite_recipes": favorite
+                    })
+                    print("✅ Preferences updated.")
+                    # Update system context in chat history
+                    chat_history.append({"role": "system", "content": f"Dietary restrictions: {dietary}\nSeasonal preferences: {seasonal}\nFavorite recipes: {favorite}"})
+                    continue
+                else:
+                    chat_history.append({"role": "user", "content": user_message})
+                    response = openai.chat.completions.create(
+                        model=recipe_api.model,
+                        messages=chat_history,
+                        temperature=0.7,
+                        max_tokens=512
+                    )
+                    reply = response.choices[0].message['content'] if hasattr(response.choices[0].message, '__getitem__') else response.choices[0].message.content
+                    print(f"Chef: {reply}")
+                    chat_history.append({"role": "assistant", "content": reply})
+        
+        elif action == "feedback":
+            recipe_id_input = input("Recipe ID or Name: ")
+            try:
+                recipe_id = int(recipe_id_input)
+            except ValueError:
+                # If not an integer, treat as recipe name
+                recipe_id = None
+                recipe_name = recipe_id_input
+            rating = int(input("Rating (1-5): "))
+            feedback_text = input("Feedback: ")
+            if recipe_id is not None:
+                provide_feedback(user_id, recipe_id, rating, feedback_text)
+            else:
+                # Optionally, you might want to look up the recipe ID by name here
+                print(f"(Note: '{recipe_name}' is a recipe name, not an ID. Please implement recipe name lookup if needed.)")
+            print("🙏 Thanks for your feedback!")
+
+        elif action == "update":
+            seasonal = input("New seasonal preference: ")
+            dietary = input("New dietary restriction: ")
+            favorite = input("New favorite recipe: ")
+            profile_manager.update_preferences(user_id, {
+                "seasonal_preferences": seasonal,
+                "dietary_restrictions": dietary,
+                "favorite_recipes": favorite
+            })
+            print("✅ Preferences updated.")
+        
+        elif action == "exit":
+            print("👋 Goodbye!")
+            break
+        
+        else:
+            print("❓ Unknown command. Try 'chat', 'feedback', 'update', or 'exit'.")
+
