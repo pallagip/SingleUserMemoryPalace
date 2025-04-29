@@ -1,0 +1,168 @@
+import os
+import json
+from openai import OpenAI
+
+client = OpenAI(api_key="api")
+
+# Define the function for PDF generation
+def generate_pdf(content=None):
+    """
+    In a real implementation, this would create a PDF.
+    For this demo, we just return a success message.
+    """
+    if content is None:
+        content = "Default content for the PDF"
+    
+    # In a real application, you would generate a PDF here
+    # For demonstration, we just print a success message
+    return {
+        "status": "PDF successful",
+        "content": content,
+        "file": "results.pdf"
+    }
+
+# Define the available functions
+available_functions = {
+    "generate_pdf": generate_pdf
+}
+
+# Define the function specifications for the model
+function_specs = [
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_pdf",
+            "description": "Generates a PDF file with the provided content",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The content to include in the PDF. If not provided, default content will be used."
+                    }
+                },
+                "required": []
+            }
+        }
+    }
+]
+
+def process_message(user_message, conversation_history):
+    """
+    Process a message from the user and determine if PDF generation is needed
+    based on context, not just explicit mentions of "PDF".
+    """
+    # Format the conversation history for the model
+    messages = conversation_history + [{"role": "user", "content": user_message}]
+    
+    # Call the model with function calling enabled
+    response = client.chat.completions.create(
+        model="gpt-4-turbo",  # Use gpt-4-turbo or gpt-3.5-turbo
+        messages=messages,
+        tools=function_specs,
+        tool_choice="auto"  # Let the model decide whether to call a function
+    )
+    
+    assistant_message = response.choices[0].message
+    
+    # Check if the model wants to call a function
+    if hasattr(assistant_message, 'tool_calls') and assistant_message.tool_calls:
+        # Handle the function call
+        function_call = assistant_message.tool_calls[0]
+        function_name = function_call.function.name
+        function_args = json.loads(function_call.function.arguments)
+        
+        # Execute the function
+        if function_name in available_functions:
+            function_response = available_functions[function_name](**function_args)
+            
+            # Add the function call and response to the messages
+            messages.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": function_call.id,
+                        "type": "function",
+                        "function": {"name": function_name, "arguments": function_call.function.arguments}
+                    }
+                ]
+            })
+            
+            messages.append({
+                "role": "tool",
+                "tool_call_id": function_call.id,
+                "content": json.dumps(function_response)
+            })
+            
+            # Get a final response from the model
+            second_response = client.chat.completions.create(
+                model="gpt-4-turbo",
+                messages=messages
+            )
+            
+            return {
+                "response": second_response.choices[0].message.content,
+                "function_called": function_name,
+                "function_response": function_response
+            }
+    
+    # If no function was called, just return the model's response
+    return {
+        "response": assistant_message.content,
+        "function_called": None,
+        "function_response": None
+    }
+
+# Example conversation history
+conversation_history = [
+    {"role": "system", "content": """
+    You are a helpful assistant that helps analyze data and create reports.
+    You can generate PDF reports when the user seems to want a report, document, or printable output.
+    Be attentive to contextual clues that suggest the user wants something in writing or a formal document,
+    even if they don't explicitly mention "PDF" or "document".
+    """},
+    {"role": "user", "content": "I've analyzed the sales data for Q1 and found that we've increased revenue by 15%."},
+    {"role": "assistant", "content": "That's fantastic news! A 15% increase in revenue for Q1 is significant. Would you like me to help with anything specific regarding this data, such as creating visualizations or preparing a report?"}
+]
+
+def interactive_chat():
+    print("Starting chat (type 'exit' to quit)")
+    chat_history = conversation_history.copy()
+    while True:
+        user_input = input("\nYou: ")
+        if user_input.lower() == 'exit':
+            break
+        result = process_message(user_input, chat_history)
+        print(f"\nAssistant: {result['response']}")
+        chat_history.append({"role": "user", "content": user_input})
+        chat_history.append({"role": "assistant", "content": result['response']})
+        if result['function_called']:
+            print(f"\n[System: {result['function_called']} was called]")
+            print(f"[Result: {result['function_response']}]\n")
+
+if __name__ == "__main__":
+    interactive_chat()
+def interactive_chat():
+    print("Starting chat (type 'exit' to quit)")
+    chat_history = conversation_history.copy()
+    
+    while True:
+        user_input = input("\nYou: ")
+        if user_input.lower() == 'exit':
+            break
+            
+        result = process_message(user_input, chat_history)
+        print(f"\nAssistant: {result['response']}")
+        
+        # Add the latest exchanges to history
+        chat_history.append({"role": "user", "content": user_input})
+        chat_history.append({"role": "assistant", "content": result['response']})
+        
+        if result['function_called']:
+            print(f"\n[System: {result['function_called']} was called]")
+            print(f"[Result: {result['function_response']}]")
+
+# Uncomment to run interactive mode
+interactive_chat()
+
