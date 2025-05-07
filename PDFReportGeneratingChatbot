@@ -1,0 +1,172 @@
+import os
+import json
+from openai import OpenAI
+import datetime
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+
+client = OpenAI(api_key="API")
+
+
+# Define a new function for generating a medical report PDF
+def generate_medical_report(doctor_name, patient_name, diagnosis, recommendations):
+    """
+    Generates a medical report PDF (real implementation) using reportlab.
+    """
+    filename = os.path.expanduser(f"~/Desktop/{patient_name.replace(' ', '_')}_medical_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
+    c = canvas.Canvas(filename, pagesize=letter)
+    width, height = letter
+    y = height - 50
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(50, y, "Medical Report"); y -= 30
+    c.setFont("Helvetica", 12)
+    c.drawString(50, y, f"Doctor: {doctor_name}"); y -= 20
+    c.drawString(50, y, f"Patient: {patient_name}"); y -= 30
+    c.drawString(50, y, "Diagnosis:"); y -= 20
+    textobject = c.beginText(50, y)
+    for line in diagnosis.split('\n'):
+        textobject.textLine(line)
+    y = textobject.getY() - 20
+    c.drawText(textobject)
+    c.drawString(50, y, "Recommendations:"); y -= 20
+    textobject = c.beginText(50, y)
+    for line in recommendations.split('\n'):
+        textobject.textLine(line)
+    c.drawText(textobject)
+    c.save()
+    return {
+        "status": "Medical report PDF successful",
+        "file": filename
+    }
+
+# Define the available functions
+available_functions = {
+    "generate_medical_report": generate_medical_report
+}
+
+# Define the function specifications for the model
+function_specs = [
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_medical_report",
+            "description": "Generates a medical report PDF by a doctor for a patient.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "doctor_name": {"type": "string", "description": "Doctor Alice is the name of the doctor preparing the report."},
+                    "patient_name": {"type": "string", "description": "Bob is the name of the patient receiving the report."},
+                    "diagnosis": {"type": "string", "description": "Bob has a broken leg."},
+                    "recommendations": {"type": "string", "description": "Don't use the bicycle."}
+                },
+                "required": ["doctor_name", "patient_name", "diagnosis", "recommendations"]
+            }
+        }
+    }
+]
+
+def process_message(user_message, conversation_history):
+    """
+    Process a message from the user and determine if PDF generation is needed
+    based on context, not just explicit mentions of "PDF".
+    """
+    # Format the conversation history for the model
+    messages = conversation_history + [{"role": "user", "content": user_message}]
+    
+    # Call the model with function calling enabled
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=messages,
+        tools=function_specs,
+        tool_choice="auto"  # Let the model decide whether to call a function
+    )
+    
+    assistant_message = response.choices[0].message
+    
+    # Check if the model wants to call a function
+    if hasattr(assistant_message, 'tool_calls') and assistant_message.tool_calls:
+        # Handle the function call
+        function_call = assistant_message.tool_calls[0]
+        function_name = function_call.function.name
+        function_args = json.loads(function_call.function.arguments)
+        
+        # Execute the function
+        if function_name in available_functions:
+            function_response = available_functions[function_name](**function_args)
+            
+            # Add the function call and response to the messages
+            messages.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": function_call.id,
+                        "type": "function",
+                        "function": {"name": function_name, "arguments": function_call.function.arguments}
+                    }
+                ]
+            })
+            
+            messages.append({
+                "role": "tool",
+                "tool_call_id": function_call.id,
+                "content": json.dumps(function_response)
+            })
+            
+            # Get a final response from the model
+            second_response = client.chat.completions.create(
+                model="gpt-4-turbo",
+                messages=messages
+            )
+            
+            return {
+                "response": second_response.choices[0].message.content,
+                "function_called": function_name,
+                "function_response": function_response
+            }
+    
+    # If no function was called, just return the model's response
+    return {
+        "response": assistant_message.content,
+        "function_called": None,
+        "function_response": None
+    }
+
+# Example conversation history
+conversation_history = [
+    {"role": "system", "content": """
+    You are a helpful assistant that helps analyze data and create reports.
+    You can generate PDF reports when the user seems to want a report, document, or printable output.
+    Be attentive to contextual clues that suggest the user wants something in writing or a formal document,
+    even if they don't explicitly mention "PDF" or "document".
+    """},
+]
+
+def interactive_chat():
+    print("Starting chat (type 'exit' to quit)")
+    chat_history = conversation_history.copy()
+    
+    while True:
+        user_input = input("\nYou: ")
+        if user_input.lower() == 'exit':
+            break
+            
+        result = process_message(user_input, chat_history)
+        print(f"\nAssistant: {result['response']}")
+        
+        # Add the latest exchanges to history
+        chat_history.append({"role": "user", "content": user_input})
+        chat_history.append({"role": "assistant", "content": result['response']})
+        
+        # Save chat history to JSON
+        log_filename = os.path.expanduser(f"~/Desktop/chat_history_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+        with open(log_filename, 'w') as log_file:
+            json.dump(chat_history, log_file, indent=2)
+        print(f"[Conversation saved to {log_filename}]")
+        
+        if result['function_called']:
+            print(f"\n[System: {result['function_called']} was called]")
+            print(f"[Result: {result['function_response']}]")
+
+# Uncomment to run interactive mode
+interactive_chat()
